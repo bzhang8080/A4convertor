@@ -1,0 +1,6 @@
+{
+  "name": "PDF A3 to A4 Splitter",
+  "description": "Automatically splits A3 PDF pages into two A4 pages. Perfect for printing and reading on Mac or PC.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
