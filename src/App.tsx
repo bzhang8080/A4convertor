@@ -5,8 +5,10 @@
 
 import React, { useState, useRef, useCallback } from 'react';
 import { PDFDocument } from 'pdf-lib';
-import { FileUp, FileDown, Scissors, Loader2, CheckCircle2, AlertCircle, FileText, Info } from 'lucide-react';
+import { FileUp, FileDown, Scissors, Loader2, CheckCircle2, AlertCircle, FileText, Info, FileStack } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import mammoth from 'mammoth';
+import html2pdf from 'html2pdf.js';
 
 interface FileInfo {
   name: string;
@@ -36,41 +38,86 @@ export default function App() {
     e.preventDefault();
     setIsDragging(false);
     const droppedFile = e.dataTransfer.files[0];
-    if (droppedFile && droppedFile.type === 'application/pdf') {
-      setFile({
-        name: droppedFile.name,
-        size: droppedFile.size,
-        file: droppedFile
-      });
-      setError(null);
-      setResultBlob(null);
-    } else {
-      setError('Please upload a valid PDF file.');
+    if (droppedFile) {
+      const isPdf = droppedFile.type === 'application/pdf';
+      const isDocx = droppedFile.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || droppedFile.name.endsWith('.docx');
+      
+      if (isPdf || isDocx) {
+        setFile({
+          name: droppedFile.name,
+          size: droppedFile.size,
+          file: droppedFile
+        });
+        setError(null);
+        setResultBlob(null);
+      } else {
+        setError('Please upload a valid PDF or Word (.docx) file.');
+      }
     }
   }, []);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
     if (selectedFile) {
-      setFile({
-        name: selectedFile.name,
-        size: selectedFile.size,
-        file: selectedFile
-      });
-      setError(null);
-      setResultBlob(null);
+      const isPdf = selectedFile.type === 'application/pdf';
+      const isDocx = selectedFile.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || selectedFile.name.endsWith('.docx');
+      
+      if (isPdf || isDocx) {
+        setFile({
+          name: selectedFile.name,
+          size: selectedFile.size,
+          file: selectedFile
+        });
+        setError(null);
+        setResultBlob(null);
+      } else {
+        setError('Please upload a valid PDF or Word (.docx) file.');
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
     }
   };
 
-  const splitPdf = async () => {
+  const processFile = async () => {
     if (!file) return;
 
     setIsProcessing(true);
     setError(null);
 
     try {
-      const arrayBuffer = await file.file.arrayBuffer();
-      const pdfDoc = await PDFDocument.load(arrayBuffer);
+      let pdfArrayBuffer: ArrayBuffer;
+
+      if (file.name.toLowerCase().endsWith('.docx')) {
+        // Handle Word File
+        const arrayBuffer = await file.file.arrayBuffer();
+        const { value: html } = await mammoth.convertToHtml({ arrayBuffer });
+        
+        // Wrap HTML in a div with some padding and responsive sizing for A3/A4
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        container.style.padding = '40px';
+        container.style.width = '297mm'; // A3 Width (portrait) or A4 Width (landscape)
+        container.style.backgroundColor = 'white';
+        container.style.color = 'black';
+        
+        // Convert HTML to PDF using html2pdf
+        const pdfBlob = await html2pdf()
+          .from(container)
+          .set({
+            margin: 10,
+            filename: 'temp.pdf',
+            image: { type: 'jpeg', quality: 0.98 },
+            html2canvas: { scale: 2, useCORS: true },
+            jsPDF: { unit: 'mm', format: 'a3', orientation: 'portrait' } // Target A3 first so we can split it
+          })
+          .outputPdf('blob');
+        
+        pdfArrayBuffer = await pdfBlob.arrayBuffer();
+      } else {
+        // Handle PDF File
+        pdfArrayBuffer = await file.file.arrayBuffer();
+      }
+
+      const pdfDoc = await PDFDocument.load(pdfArrayBuffer);
       const newPdfDoc = await PDFDocument.create();
       
       const pages = pdfDoc.getPages();
@@ -84,48 +131,58 @@ export default function App() {
         // Embed the original page to use it as a graphic
         const [embeddedPage] = await newPdfDoc.embedPages([page]);
 
-        if (isLandscape) {
-          // A3 Landscape (e.g. 842x595) -> Two A4 Portrait (421x595 each)
-          const midX = width / 2;
-          
-          // Left page
-          const leftPage = newPdfDoc.addPage([midX, height]);
-          leftPage.drawPage(embeddedPage, {
-            x: 0,
-            y: 0,
-            width: width,
-            height: height,
-          });
-          
-          // Right page
-          const rightPage = newPdfDoc.addPage([midX, height]);
-          rightPage.drawPage(embeddedPage, {
-            x: -midX,
-            y: 0,
-            width: width,
-            height: height,
-          });
+        // Tolerance for A3/A4 detection: A3 is ~842x595 or 595x842 in points
+        // If width or height is significantly larger than A4 (~595), we split.
+        const isLikelyA3 = width > 700 || height > 700;
+
+        if (isLikelyA3) {
+          if (isLandscape) {
+            // A3 Landscape -> Two A4 Portrait
+            const midX = width / 2;
+            
+            // Left page
+            const leftPage = newPdfDoc.addPage([midX, height]);
+            leftPage.drawPage(embeddedPage, {
+              x: 0,
+              y: 0,
+              width: width,
+              height: height,
+            });
+            
+            // Right page
+            const rightPage = newPdfDoc.addPage([midX, height]);
+            rightPage.drawPage(embeddedPage, {
+              x: -midX,
+              y: 0,
+              width: width,
+              height: height,
+            });
+          } else {
+            // A3 Portrait -> Two A4 Landscape
+            const midY = height / 2;
+            
+            // Top page
+            const topPage = newPdfDoc.addPage([width, midY]);
+            topPage.drawPage(embeddedPage, {
+              x: 0,
+              y: -midY,
+              width: width,
+              height: height,
+            });
+            
+            // Bottom page
+            const bottomPage = newPdfDoc.addPage([width, midY]);
+            bottomPage.drawPage(embeddedPage, {
+              x: 0,
+              y: 0,
+              width: width,
+              height: height,
+            });
+          }
         } else {
-          // A3 Portrait (e.g. 595x842) -> Two A4 Landscape (595x421 each)
-          const midY = height / 2;
-          
-          // Top page
-          const topPage = newPdfDoc.addPage([width, midY]);
-          topPage.drawPage(embeddedPage, {
-            x: 0,
-            y: -midY,
-            width: width,
-            height: height,
-          });
-          
-          // Bottom page
-          const bottomPage = newPdfDoc.addPage([width, midY]);
-          bottomPage.drawPage(embeddedPage, {
-            x: 0,
-            y: 0,
-            width: width,
-            height: height,
-          });
+          // It's already A4 or smaller, just copy it
+          const [copy] = await newPdfDoc.copyPages(pdfDoc, [i]);
+          newPdfDoc.addPage(copy);
         }
       }
 
@@ -134,7 +191,7 @@ export default function App() {
       setResultBlob(blob);
     } catch (err) {
       console.error(err);
-      setError('An error occurred while processing the PDF. Please try again.');
+      setError('An error occurred while processing the file. Please try again.');
     } finally {
       setIsProcessing(false);
     }
@@ -171,11 +228,11 @@ export default function App() {
           {/* Header */}
           <div className="flex items-center gap-4 mb-8">
             <div className="w-12 h-12 bg-blue-500 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-blue-200">
-              <Scissors size={24} />
+              <FileStack size={24} />
             </div>
             <div>
-              <h1 className="text-2xl font-semibold tracking-tight">PDF A3 to A4 Splitter</h1>
-              <p className="text-gray-500 text-sm">Convert large A3 pages into printable A4 sheets</p>
+              <h1 className="text-2xl font-semibold tracking-tight">PDF & Word Splitter</h1>
+              <p className="text-gray-500 text-sm">Convert A3 PDF/Word into printable A4 sheets</p>
             </div>
           </div>
 
@@ -199,13 +256,13 @@ export default function App() {
                 <div className="w-16 h-16 bg-white rounded-full shadow-md flex items-center justify-center text-gray-400 mb-4 group-hover:text-blue-500 transition-colors">
                   <FileUp size={32} />
                 </div>
-                <p className="font-medium text-lg mb-1">Select or drag & drop A3 PDF</p>
-                <p className="text-gray-400 text-sm text-center">Compatible with Foxit and other PDF readers</p>
+                <p className="font-medium text-lg mb-1">Select or drag & drop PDF/Word</p>
+                <p className="text-gray-400 text-sm text-center">A3 files will be automatically split to A4</p>
                 <input 
                   type="file" 
                   ref={fileInputRef}
                   onChange={handleFileChange}
-                  accept=".pdf"
+                  accept=".pdf,.docx"
                   className="hidden"
                 />
               </motion.div>
@@ -241,7 +298,7 @@ export default function App() {
                   {!resultBlob ? (
                     <button
                       disabled={isProcessing}
-                      onClick={splitPdf}
+                      onClick={processFile}
                       className={`
                         w-full h-14 rounded-2xl font-semibold flex items-center justify-center gap-2 transition-all
                         ${isProcessing 
@@ -257,7 +314,7 @@ export default function App() {
                       ) : (
                         <>
                           <Scissors size={20} />
-                          Split to A4
+                          Process to A4
                         </>
                       )}
                     </button>
@@ -308,9 +365,9 @@ export default function App() {
               <div className="space-y-2">
                 <p className="font-semibold text-gray-700 flex items-center gap-2">
                   <span className="w-5 h-5 rounded-full bg-gray-100 flex items-center justify-center text-[10px]">1</span>
-                  Automatic Layout
+                  Automatic Split
                 </p>
-                <p className="text-gray-500 leading-relaxed">Detects landscape A3 (wide) and splits it vertically. Detects portrait A3 (tall) and splits it horizontally.</p>
+                <p className="text-gray-500 leading-relaxed">Detects A3 PDF/Word and splits it into A4. If it's already A4, it maintains the correct size.</p>
               </div>
               <div className="space-y-2">
                 <p className="font-semibold text-gray-700 flex items-center gap-2">
@@ -331,7 +388,7 @@ export default function App() {
         transition={{ delay: 0.5 }}
         className="mt-8 text-gray-400 text-xs font-medium uppercase tracking-[0.2em]"
       >
-        PDF Utility • local processing • no-server
+        PDF & Word Utility • local processing • no-server
       </motion.p>
     </div>
   );
