@@ -7,7 +7,7 @@ import React, { useState, useRef, useCallback } from 'react';
 import { PDFDocument } from 'pdf-lib';
 import { FileUp, FileDown, Scissors, Loader2, CheckCircle2, AlertCircle, FileText, Info, FileStack } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import mammoth from 'mammoth';
+import * as docx from 'docx-preview';
 import html2pdf from 'html2pdf.js';
 
 interface FileInfo {
@@ -87,31 +87,47 @@ export default function App() {
       let pdfArrayBuffer: ArrayBuffer;
 
       if (file.name.toLowerCase().endsWith('.docx')) {
-        // Handle Word File
+        // Handle Word File via high-fidelity rendering
         const arrayBuffer = await file.file.arrayBuffer();
-        const { value: html } = await mammoth.convertToHtml({ arrayBuffer });
         
-        // Wrap HTML in a div with some padding and responsive sizing for A3/A4
+        // Use docx-preview to render the Word doc into a container
         const container = document.createElement('div');
-        container.innerHTML = html;
-        container.style.padding = '40px';
-        container.style.width = '297mm'; // A3 Width (portrait) or A4 Width (landscape)
-        container.style.backgroundColor = 'white';
-        container.style.color = 'black';
-        
-        // Convert HTML to PDF using html2pdf
-        const pdfBlob = await html2pdf()
-          .from(container)
-          .set({
-            margin: 10,
-            filename: 'temp.pdf',
-            image: { type: 'jpeg', quality: 0.98 },
-            html2canvas: { scale: 2, useCORS: true },
-            jsPDF: { unit: 'mm', format: 'a3', orientation: 'portrait' } // Target A3 first so we can split it
-          })
-          .outputPdf('blob');
-        
-        pdfArrayBuffer = await pdfBlob.arrayBuffer();
+        // Hidden container to avoid UI disruption
+        container.style.position = 'fixed';
+        container.style.top = '-10000px';
+        container.style.left = '-10000px';
+        container.style.width = '210mm'; // Standard base width for rendering
+        document.body.appendChild(container);
+
+        try {
+          await docx.renderAsync(arrayBuffer, container, undefined, {
+            ignoreHeight: true,
+            ignoreWidth: false,
+          });
+
+          // Convert the rendered Word document into a PDF
+          // Note: We target A4/A3 format here
+          const pdfBlob = await html2pdf()
+            .from(container)
+            .set({
+              margin: 0,
+              filename: 'temp.pdf',
+              image: { type: 'jpeg', quality: 0.98 },
+              html2canvas: { 
+                scale: 2, 
+                useCORS: true,
+                logging: false,
+                windowWidth: container.scrollWidth
+              },
+              jsPDF: { unit: 'mm', format: 'a3', orientation: 'portrait' } 
+            })
+            .outputPdf('blob');
+          
+          pdfArrayBuffer = await pdfBlob.arrayBuffer();
+        } finally {
+          // Cleanup
+          document.body.removeChild(container);
+        }
       } else {
         // Handle PDF File
         pdfArrayBuffer = await file.file.arrayBuffer();
